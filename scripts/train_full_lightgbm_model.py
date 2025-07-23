@@ -1,5 +1,5 @@
 import pandas as pd
-from wb_ranking_model import WBRankingModel
+from src.wb_ranking_model import WBRankingModel
 import argparse
 import sys
 

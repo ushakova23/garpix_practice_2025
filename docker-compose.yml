@@ -1,0 +1,14 @@
+services:
+  wb-analytics:
+    build: .
+    container_name: wb-analytics-app
+    ports:
+      - "8501:8501"
+    environment:
+      - PYTHONPATH=/app
+    volumes:
+      - ./.env:/app/.env:ro
+      - .:/app
+    restart: unless-stopped
+    working_dir: /app
+    command: ["python", "-m", "streamlit", "run", "src/streamlit_app_v2.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true"]

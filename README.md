@@ -28,5 +28,5 @@ docker-compose up -d --build
 ```
 4. API будет доступно по адресу:
 ```
-http://localhost:8000
+http://localhost:8501
 ```
