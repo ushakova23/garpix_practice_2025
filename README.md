@@ -20,7 +20,7 @@ COMPANY_ID=ваш_company_id
 USER_ID=ваш_user_id
 COOKIE_STRING=ваши_cookies
 ```
- Замените ваш_токен, ваш_company_id, ваш_user_id и ваши_cookies на реальные значения.
+Замените ваш_токен, ваш_company_id, ваш_user_id и ваши_cookies на реальные значения.
 
 3. Соберите и запустите контейнер:
 ```
