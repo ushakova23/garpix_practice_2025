@@ -67,20 +67,18 @@ def calculate_constructor_score(product_data):
     if not product_data:
         return 0
     
-    score = 0
+    score = 15
     description = product_data.get("description", "")
-    if isinstance(description, str) and len(description) > 500:
+    if isinstance(description, str) and len(description) > 150:
         score += 30
     
     if product_data.get("images_count", 0) >= 6:
         score += 30
     
     product_name = product_data.get("product_name", "")
-    if len(str(product_name).split()) >= 5:
+    if len(str(product_name).split()) >= 2:
         score += 25
-    
-    if product_data.get("category"):
-        score += 15
+ 
     
     return min(100, score)
 
@@ -394,11 +392,7 @@ if st.session_state.get("analysis_complete") and st.session_state.get("current_d
                 st.metric(
                     label="💵 Цена товара",
                     value=f"{price:,.0f}₽",
-                    delta=(
-                        f"-{current_data.get('discount', 0)}%"
-                        if current_data.get("discount")
-                        else None
-                    ),
+                    
                 )
             else:
                 st.metric(label="💵 Цена", value="Нет данных", delta=None)
