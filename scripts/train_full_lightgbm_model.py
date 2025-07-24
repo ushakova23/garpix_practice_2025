@@ -83,6 +83,22 @@ def main():
     print("- position_model.pkl (модель позиции)")
     print("- proceeds_model.pkl (модель выручки)")
     print("- feature_list.pkl (список признаков)")
+    import json
+
+    print("\nСохраняем важность признаков...")
+    try:
+        importance_data_numpy = model.get_feature_importance_dict()
+    
+        importance_data_python = {key: int(value) for key, value in importance_data_numpy.items()}
+    
+        with open("models/feature_importance.json", "w", encoding="utf-8") as f:
+            json.dump(importance_data_python, f, ensure_ascii=False, indent=4)
+        
+        print("Важность признаков сохранена в models/feature_importance.json")
+    except Exception as e:
+        print(f"Ошибка сохранения важности признаков: {e}")
+
+    print("\nОбучение завершено!")
 
 
 if __name__ == "__main__":

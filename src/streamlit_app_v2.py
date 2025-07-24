@@ -1,3 +1,5 @@
+import os
+import json
 import joblib
 import numpy as np
 import pandas as pd
@@ -41,6 +43,9 @@ def prepare_model_input(
         "quantity": product_details.get("quantity"),
         "lost_proceeds": product_details.get("lost_proceeds"),
         "images_count": len(product_details.get("images", [])),
+        "product_name": product_details.get("name", ""),
+        "description": product_details.get("description", ""),
+        "cpm": product_details.get("cpm", 0)
     }
     temp_df = pd.DataFrame([data_dict])
 
@@ -57,135 +62,134 @@ def prepare_model_input(
     return temp_df.iloc[0].to_dict()
 
 
+def calculate_constructor_score(product_data):
+    """Рассчитывает качество наполнения карточки товара (от 0 до 100)."""
+    if not product_data:
+        return 0
+    
+    score = 0
+    description = product_data.get("description", "")
+    if isinstance(description, str) and len(description) > 500:
+        score += 30
+    
+    if product_data.get("images_count", 0) >= 6:
+        score += 30
+    
+    product_name = product_data.get("product_name", "")
+    if len(str(product_name).split()) >= 5:
+        score += 25
+    
+    if product_data.get("category"):
+        score += 15
+    
+    return min(100, score)
+
+
 def calculate_ranking_factors(current_data):
-    """Рассчитывает факторы ранжирования на основе РЕАЛЬНЫХ данных товара."""
+    """
+    Рассчитывает оценку ключевых факторов ранжирования для товара (от 0 до 100).
+    """
+    if not current_data:
+        return {factor: 0 for factor in ["Цена и скидки", "Продажи и оборот", "Рейтинги и отзывы",
+                                        "Качество карточки", "Доставка", "Остатки на складе"]}
+    
     factors = {}
+    
+    # Цена и Скидки
+    discount_score = 50 if current_data.get("is_discounted", 0) else 0
+    discount_score += min(50, (current_data.get("discount", 0) / 30.0) * 50)
+    factors["Цена и скидки"] = discount_score
 
-    if current_data.get("is_discounted"):
-        factors["Акции"] = current_data.get("discount", 0)
+    # Продажи и оборот (шкала до 250,000 руб/мес)
+    factors["Продажи и оборот"] = min(100, (current_data.get("proceeds", 0) / 250000.0) * 100)
 
-    if current_data.get("proceeds") is not None:
-        factors["Продажи"] = min(100, current_data.get("proceeds", 0) / 1000)
+    # Рейтинги и отзывы
+    rating_score = (current_data.get("product_rating", 0) / 5.0) * 40
+    rating_score += (current_data.get("seller_rating", 0) / 5.0) * 30
+    rating_score += min(30, (current_data.get("reviews_count", 0) / 100.0) * 30)
+    factors["Рейтинги и отзывы"] = rating_score
 
-    if current_data.get("seller_rating") is not None:
-        factors["Рейтинг продавца"] = current_data.get("seller_rating", 0) * 20
+    # Качество карточки
+    factors["Качество карточки"] = calculate_constructor_score(current_data)
 
-    if current_data.get("product_rating") is not None:
-        factors["Рейтинг товара"] = current_data.get("product_rating", 0) * 20
+    # Доставка (шкала от 24 до 96 часов)
+    delivery_hours = current_data.get("delivery_efficiency_wh_avg_pos", 96)
+    delivery_score = 100 - ((delivery_hours - 24) / 72.0) * 100
+    factors["Доставка"] = max(0, delivery_score)
+    
+    # Остатки на складе (шкала до 500 шт)
+    factors["Остатки на складе"] = min(100, (current_data.get("quantity", 0) / 500.0) * 100)
 
-    # Конструктор на основе реальных данных карточки
-    constructor_score = calculate_constructor_score(current_data)
-    if constructor_score > 0:
-        factors["Качество карточки"] = constructor_score
-
-    if current_data.get("delivery_efficiency_wh_avg_pos") is not None:
-        delivery_score = min(
-            100,
-            max(
-                0,
-                100
-                - (current_data.get("delivery_efficiency_wh_avg_pos", 0) / 100 * 100),
-            ),
-        )
-        if delivery_score > 0:
-            factors["Доставка"] = delivery_score
+    # Финальная проверка
+    for key in factors:
+        factors[key] = max(0, min(100, factors[key]))
 
     return factors
 
 
-def calculate_constructor_score(product_data):
-    """Рассчитывает качество использования конструктора на основе данных карточки."""
-    score = 0
-
-    # Проверяем заполненность описания
-    description = product_data.get("description", "")
-    if isinstance(description, str) and len(description) > 200:
-        score += 25
-    elif isinstance(description, str) and len(description) > 100:
-        score += 15
-
-    # Проверяем количество изображений
-    images_count = product_data.get("images_count", 0)
-    if images_count >= 8:
-        score += 25
-    elif images_count >= 5:
-        score += 15
-    elif images_count >= 3:
-        score += 10
-
-    # Проверяем качество названия
-    product_name = str(product_data.get("product_name", ""))
-    name_words = len(product_name.split())
-    if name_words >= 5:  # Хорошо оптимизированное название
-        score += 25
-    elif name_words >= 3:
-        score += 15
-
-    # Проверяем наличие категории
-    if product_data.get("category"):
-        score += 25
-
-    # Ограничиваем максимальный скор
-    return min(100, score)
-
-
-def generate_optimization_recommendations(current_data, base_pos, base_proc):
-    """Генерирует рекомендации"""
+def generate_optimization_recommendations(current_data):
+    """Генерирует умные рекомендации, всегда находя точки роста."""
+    if not current_data:
+        return [{"factor": "Данные недоступны", "improvement": "Проверьте подключение к API",
+                "position_change": "-", "revenue_change": "-", "cost": "-"}]
+    
     recommendations = []
+    
+    if current_data.get("discount", 0) < 15 and current_data.get("price", 0) > 0:
+        recommendations.append({
+            "factor": "Усилить акцию",
+            "improvement": "Увеличить скидку до 20-25%",
+            "position_change": "Значительный буст",
+            "revenue_change": "Привлечение покупателей",
+            "cost": f"~{int(current_data['price'] * 0.1):,}₽ доп. с единицы"
+        })
 
-    # Проверяем акции
-    if not current_data.get("is_discounted", 0) and current_data.get("price"):
-        current_price = current_data.get("price")
-        discount_cost = current_price * 0.15  # 15% скидка от цены товара
-        recommendations.append(
-            {
-                "factor": "Запустить акцию",
-                "improvement": "Скидка 15%",
-                "position_change": "Улучшение позиций",
-                "revenue_change": "Рост конверсии",
-                "cost": f"{int(discount_cost):,}₽ потеря маржи",
-            }
-        )
+    if calculate_constructor_score(current_data) < 90:
+        recommendations.append({
+            "factor": "Улучшить карточку",
+            "improvement": "Добавить фото/видео, расширить описание",
+            "position_change": "Рост CTR",
+            "revenue_change": "Больше доверия и продаж",
+            "cost": "от 5,000₽ (контент)"
+        })
 
-    # Проверяем изображения
-    images_count = current_data.get("images_count", 0)
-    if images_count < 5:
-        recommendations.append(
-            {
-                "factor": "Улучшить карточку",
-                "improvement": f"Добавить {5-images_count} фото",
-                "position_change": "Лучше конверсия",
-                "revenue_change": "Больше продаж",
-                "cost": "8,000₽ фотосъемка",
-            }
-        )
+    if current_data.get("product_rating", 0) < 4.8:
+        recommendations.append({
+            "factor": "Поднять рейтинг",
+            "improvement": f"С {current_data.get('product_rating', 0):.1f} до 4.8+ через работу с отзывами",
+            "position_change": "Выше в поиске",
+            "revenue_change": "Повышение лояльности",
+            "cost": "от 10,000₽ (сервисы/качество)"
+        })
 
-    # Проверяем рейтинг
-    rating = current_data.get("product_rating", 0)
-    if rating > 0 and rating < 4.5:
-        recommendations.append(
-            {
-                "factor": "Поднять рейтинг",
-                "improvement": f"С {rating:.1f} до 4.5+",
-                "position_change": "Выше в поиске",
-                "revenue_change": "Больше доверия",
-                "cost": "10,000₽ работа с качеством",
-            }
-        )
+    if current_data.get("proceeds", 0) < 50000:
+        recommendations.append({
+            "factor": "Увеличить продажи",
+            "improvement": "Запустить внутреннюю рекламу (поиск/каталог)",
+            "position_change": "Резкий рост видимости",
+            "revenue_change": "Наращивание оборота",
+            "cost": "от 15,000₽ (бюджет)"
+        })
+    
+    if current_data.get("delivery_efficiency_wh_avg_pos", 100) > 48:
+         recommendations.append({
+             "factor": "Ускорить доставку",
+             "improvement": "Распределить товар по региональным складам",
+             "position_change": "Приоритет в выдаче",
+             "revenue_change": "Рост заказов из регионов",
+             "cost": "Логистические расходы"
+         })
 
-    # Проверяем рподажи
-    if not current_data.get("proceeds"):
-        recommendations.append(
-            {
-                "factor": "Запустить продвижение",
-                "improvement": "Начать продажи",
-                "position_change": "Появление в поиске",
-                "revenue_change": "Первые продажи",
-                "cost": "20,000₽ реклама + промо",
-            }
-        )
+    if not recommendations:
+        recommendations.append({
+            "factor": "Анализ конкурентов",
+            "improvement": "Найти слабые места у топ-5 и превзойти их",
+            "position_change": "Стратегическое преимущество",
+            "revenue_change": "Отстройка от рынка",
+            "cost": "Время на анализ"
+        })
 
-    return recommendations
+    return recommendations[:4]
 
 
 def get_full_report(city: str, search_query: str, product_id: int):
@@ -338,9 +342,9 @@ if st.button("🚀 Получить рекомендации", type="primary", u
 
         # Сохраняем модели для симулятора
         try:
-            model_pos = joblib.load("position_model.pkl")
-            model_proc = joblib.load("proceeds_model.pkl")
-            features = joblib.load("feature_list.pkl")
+            model_pos = joblib.load("models/position_model.pkl")
+            model_proc = joblib.load("models/proceeds_model.pkl")
+            features = joblib.load("models/feature_list.pkl")
             st.session_state["model_pos"] = model_pos
             st.session_state["model_proc"] = model_proc
             st.session_state["features"] = features
@@ -370,7 +374,7 @@ if st.session_state.get("analysis_complete") and st.session_state.get("current_d
             if factors_count > 0:
                 st.metric(
                     label="📊 Доступно факторов",
-                    value=f"{factors_count} из 7",
+                    value=f"{factors_count} из 6",
                     delta=None,
                 )
             else:
@@ -401,135 +405,85 @@ if st.session_state.get("analysis_complete") and st.session_state.get("current_d
 
         st.divider()
 
-        # === ФАКТОРЫ РАНЖИРОВАНИЯ ===
+        # === ФАКТОРЫ РАНЖИРОВАНИЯ (из первого кода) ===
         col1, col2 = st.columns([1, 1])
-
         with col1:
-            st.subheader("📊 Влияние факторов на ранжирование")
-            st.caption(
-                "Теоретическая важность факторов в алгоритме WB (по исследованиям)"
-            )
-
-            # Теоретические данные о важности факторов (из публичных исследований)
-            importance_data = {
-                "Доставка": 35,
-                "Продажи/Оборот": 25,
-                "Конверсия/CTR": 15,
-                "Рейтинги": 10,
-                "Акции/Промо": 8,
-                "SEO карточки": 4,
-                "Прочее": 3,
-            }
-
-            factor_names = list(importance_data.keys())
-            factor_values = list(importance_data.values())
-
-            fig_importance = px.bar(
-                x=factor_values,
-                y=factor_names,
-                orientation="h",
-                title="",
-                color=factor_values,
-                color_continuous_scale="Blues",
-            )
-            fig_importance.update_layout(
-                height=400,
-                showlegend=False,
-                coloraxis_showscale=False,
-                xaxis_title="Влияние на ранжирование",
-                yaxis_title="",
-                margin=dict(l=0, r=0, t=0, b=0),
-            )
-            fig_importance.update_traces(texttemplate="%{x}", textposition="outside")
-            st.plotly_chart(fig_importance, use_container_width=True)
+            st.subheader("📊 Влияние факторов на позицию")
+            st.caption("Оценка AI-модели на основе ваших данных")
+            try:
+                if os.path.exists("models/feature_importance.json"):
+                    with open("models/feature_importance.json", "r", encoding="utf-8") as f:
+                        tech_importances = json.load(f)
+                    
+                    factor_groups = {
+                        "Продажи и оборот": ["proceeds"],
+                        "Цена и скидки": ["price", "discount"],
+                        "Доставка": ["delivery"],
+                        "Рейтинги и отзывы": ["rating", "reviews"],
+                        "Качество карточки": ["images", "category", "query"],
+                        "Остатки на складе": ["quantity", "stock"],
+                        "Реклама": ["cpm", "ad_"]
+                    }
+                    
+                    agg_importance = {
+                        group: sum(imp for feat, imp in tech_importances.items() if any(k in feat for k in keys))
+                        for group, keys in factor_groups.items()
+                    }
+                    
+                    total_sum = sum(agg_importance.values())
+                    if total_sum > 0:
+                        df = pd.DataFrame([
+                            {"Фактор": k, "Важность (%)": v / total_sum * 100}
+                            for k, v in agg_importance.items() if v > 0
+                        ]).sort_values("Важность (%)")
+                        
+                        fig = px.bar(df, x='Важность (%)', y='Фактор', orientation="h",
+                                   color='Важность (%)', color_continuous_scale=px.colors.sequential.Blues,
+                                   text='Важность (%)')
+                        fig.update_layout(height=400, showlegend=False, xaxis_title=None, yaxis_title=None,
+                                        margin=dict(l=0, r=0, t=0, b=0),
+                                        xaxis_range=[0, df['Важность (%)'].max() * 1.1])
+                        fig.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.info("Данные о важности факторов недоступны")
+                else:
+                    st.info("Файл с важностью факторов не найден")
+            except Exception as e:
+                st.warning(f"Не удалось построить график важности факторов: {e}")
 
         with col2:
-            st.subheader("🎯 Факторы вашего товара")
-            st.caption("На основе реальных данных из API")
-
-            # Прогресс-бары для факторов
+            st.subheader("🎯 Оценка вашего товара")
+            st.caption("Насколько хорошо реализован каждый фактор (0-100%)")
             factors_data = calculate_ranking_factors(current_data)
-
-            if not factors_data:
-                st.warning("⚠️ Недостаточно данных для анализа факторов")
-                st.info(
-                    "Возможные причины: товар новый, данные не полные, ограничения API"
+            display_factors = ["Продажи и оборот", "Цена и скидки", "Доставка", "Рейтинги и отзывы", "Качество карточки", "Остатки на складе"]
+            
+            for factor in display_factors:
+                value_int = int(factors_data.get(factor, 0))
+                
+                color = "🟢" if value_int >= 75 else "🟡" if value_int >= 40 else "🔴"
+                st.markdown(f"{color} **{factor}**")
+                
+                st.progress(value_int / 100)
+                
+                st.markdown(
+                    f"<div style='text-align: right; margin-top: -30px; margin-bottom: 10px; font-weight: 500;'><small>{value_int}%</small></div>",
+                    unsafe_allow_html=True
                 )
-            else:
-                for factor, value in factors_data.items():
-                    # Цветовая схема
-                    if value >= 70:
-                        color = "🟢"
-                    elif value >= 40:
-                        color = "🟡"
-                    else:
-                        color = "🔴"
-
-                    st.markdown(f"{color} **{factor}**")
-                    st.progress(value / 100)
-                    st.markdown(
-                        f"<div style='text-align: right; margin-top: -20px; margin-bottom: 10px;'><small>{value:.0f}%</small></div>",
-                        unsafe_allow_html=True,
-                    )
 
         st.divider()
 
-        # === РЕКОМЕНДАЦИИ ПО ОПТИМИЗАЦИИ ===
+        # === РЕКОМЕНДАЦИИ ПО ОПТИМИЗАЦИИ (из первого кода) ===
         st.subheader("💡 Топ рекомендации по оптимизации")
-
-        recommendations = generate_optimization_recommendations(
-            current_data, base_pos, base_proc
-        )
-
-        # Таблица рекомендаций
-        rec_df = pd.DataFrame(recommendations)
-        if not rec_df.empty:
-            rec_df = rec_df.rename(
-                columns={
-                    "factor": "ДЕЙСТВИЕ",
-                    "improvement": "ИЗМЕНЕНИЕ",
-                    "position_change": "ЭФФЕКТ НА ПОЗИЦИИ",
-                    "revenue_change": "ЭФФЕКТ НА ПРОДАЖИ",
-                    "cost": "СТОИМОСТЬ",
-                }
-            )
-
-            st.dataframe(rec_df, use_container_width=True, hide_index=True)
-        else:
-            st.info(
-                "🎉 Все основные факторы оптимизированы! Товар в хорошем состоянии."
-            )
-
-        st.divider()
-
-        # === РЕЗУЛЬТАТЫ КОМПЛЕКСНОЙ ОПТИМИЗАЦИИ ===
-        if recommendations:
-            st.subheader("🎯 Потенциал улучшения")
-
-            col1, col2 = st.columns(2)
-
-            with col1:
-                st.info("📈 **Возможные улучшения:**")
-                for rec in recommendations[:3]:  # Показываем топ-3
-                    st.write(f"• {rec['factor']}: {rec['improvement']}")
-
-            with col2:
-                st.info("💰 **Инвестиции в оптимизацию:**")
-                total_cost = sum(
-                    [
-                        int(rec["cost"].replace("₽", "").replace(",", "").split()[0])
-                        for rec in recommendations
-                        if "₽" in rec["cost"]
-                    ]
-                )
-                if total_cost > 0:
-                    st.write(f"• Общие затраты: ~{total_cost:,}₽")
-                    st.write(
-                        f"• Средняя стоимость действия: {total_cost//len(recommendations):,}₽"
-                    )
-        else:
-            st.success("🎉 Товар хорошо оптимизирован!")
-            st.info("Основные факторы ранжирования находятся в хорошем состоянии.")
+        recommendations = generate_optimization_recommendations(current_data)
+        rec_df = pd.DataFrame(recommendations).rename(columns={
+            "factor": "ДЕЙСТВИЕ",
+            "improvement": "ИЗМЕНЕНИЕ",
+            "position_change": "ЭФФЕКТ НА ПОЗИЦИИ",
+            "revenue_change": "ЭФФЕКТ НА ПРОДАЖИ",
+            "cost": "СТОИМОСТЬ"
+        })
+        st.dataframe(rec_df, use_container_width=True, hide_index=True)
 
         st.divider()
 
@@ -547,32 +501,36 @@ if st.session_state.get("analysis_complete") and st.session_state.get("current_d
                 "Участие в акциях:",
                 0,
                 100,
-                max(20, int(factors_data.get("Акции", 20))),
+                max(20, int(factors_data.get("Цена и скидки", 20))),
                 key="promo_slider",
             )
             sales_volume = st.slider(
                 "Объем продаж:",
                 0,
                 100,
-                max(45, int(factors_data.get("Продажи", 45))),
+                max(45, int(factors_data.get("Продажи и оборот", 45))),
                 key="sales_slider",
-            )
-            conversion = st.slider(
-                "Конверсия:",
-                0,
-                100,
-                max(60, int(factors_data.get("Конверсия", 60))),
-                key="conversion_slider",
             )
             product_rating = st.slider(
                 "Рейтинг товара:",
                 0,
                 100,
-                max(75, int(factors_data.get("Рейтинг товара", 75))),
+                max(75, int(factors_data.get("Рейтинги и отзывы", 75))),
                 key="rating_slider",
             )
             card_completion = st.slider(
-                "Наполнение карточки:", 50, 100, 70, key="card_slider"
+                "Наполнение карточки:",
+                0,
+                100,
+                max(70, int(factors_data.get("Качество карточки", 70))),
+                key="card_slider"
+            )
+            delivery_quality = st.slider(
+                "Доставка:",
+                0,
+                100,
+                max(60, int(factors_data.get("Доставка", 60))),
+                key="delivery_slider",
             )
             price = st.slider(
                 "Цена товара:",
@@ -596,72 +554,139 @@ if st.session_state.get("analysis_complete") and st.session_state.get("current_d
             revenue_change = 0
 
             try:
-                # Влияние акций
-                base_promo = factors_data.get("Акции", 20)
-                if promo_participation > base_promo:
-                    diff = (promo_participation - base_promo) / 20.0
-                    position_change -= int(diff * 3)
-                    revenue_change += int(diff * 4000)
+                # Влияние акций (более чувствительное)
+                base_promo = factors_data.get("Цена и скидки", 20)
+                promo_diff = (promo_participation - base_promo) / 10.0  # Уменьшили делитель
+                if abs(promo_diff) > 0.1:  # Реагируем на малые изменения
+                    position_change -= promo_diff * 5  # Увеличили множитель
+                    revenue_change += promo_diff * 6000
 
-                # Влияние рейтинга
-                base_rating = factors_data.get("Рейтинг товара", 75)
-                if product_rating > base_rating:
-                    diff = (product_rating - base_rating) / 25.0
-                    position_change -= int(diff * 2)
-                    revenue_change += int(diff * 2000)
+                # Влияние продаж (новый фактор)
+                base_sales = factors_data.get("Продажи и оборот", 45)
+                sales_diff = (sales_volume - base_sales) / 15.0
+                if abs(sales_diff) > 0.1:
+                    position_change -= sales_diff * 8  # Продажи сильно влияют на позицию
+                    revenue_change += sales_diff * 8000
 
-                # Влияние конверсии
-                base_conversion = factors_data.get("Конверсия", 60)
-                if conversion > base_conversion:
-                    diff = (conversion - base_conversion) / 20.0
-                    position_change -= int(diff * 2)
-                    revenue_change += int(diff * 3000)
+                # Влияние рейтинга (более чувствительное)
+                base_rating = factors_data.get("Рейтинги и отзывы", 75)
+                rating_diff = (product_rating - base_rating) / 15.0  # Уменьшили делитель
+                if abs(rating_diff) > 0.1:
+                    position_change -= rating_diff * 6  # Увеличили множитель
+                    revenue_change += rating_diff * 4000
+
+                # Влияние карточки (скорректированное)
+                base_card = factors_data.get("Качество карточки", 70)
+                card_diff = (card_completion - base_card) / 12.0  # Уменьшили делитель
+                if abs(card_diff) > 0.1:
+                    position_change -= card_diff * 4
+                    revenue_change += card_diff * 3500
+
+                # Влияние доставки (более заметное)
+                base_delivery = factors_data.get("Доставка", 60)
+                delivery_diff = (delivery_quality - base_delivery) / 12.0
+                if abs(delivery_diff) > 0.1:
+                    position_change -= delivery_diff * 7  # Доставка очень важна
+                    revenue_change += delivery_diff * 5000
+
+                # Влияние цены (обратная зависимость)
+                current_price = current_data.get("price", 1200)
+                price_change_pct = (price - current_price) / current_price
+                if abs(price_change_pct) > 0.05:  # Реагируем на изменения > 5%
+                    position_change += price_change_pct * 15  # Выше цена = хуже позиция
+                    revenue_change -= price_change_pct * 3000  # Но может компенсироваться объемом
 
                 # Влияние конструктора
                 if constructor_option:
-                    position_change -= 1
-                    revenue_change += 1000
+                    position_change -= 2
+                    revenue_change += 1500
 
                 # Влияние клуба
                 if wb_club_discount:
-                    position_change -= 1
-                    revenue_change += 800
+                    position_change -= 1.5
+                    revenue_change += 1200
 
                 # Расчет новых значений
                 current_pos = current_data.get("position_real")
                 if current_pos is None:
                     current_pos = int(base_pos) if base_pos else 50
 
+                # Округляем изменения позиции для лучшего отображения
+                position_change = round(position_change)
                 new_pos_sim = max(1, current_pos + position_change)
-                new_revenue_sim = base_proc + revenue_change
+                new_revenue_sim = max(0, base_proc + revenue_change)
 
                 st.metric(
                     "Новая позиция",
-                    f"~ {int(new_pos_sim)}",
+                    f"{int(new_pos_sim)}",
                     (
-                        f"{position_change} мест"
-                        if position_change != 0
+                        f"{position_change:+.0f} мест"
+                        if abs(position_change) >= 0.5
                         else "Без изменений"
                     ),
                     delta_color="inverse" if position_change < 0 else "normal",
                 )
                 st.metric(
                     "Новая выручка",
-                    f"~ {new_revenue_sim:,.0f}₽",
+                    f"{new_revenue_sim:,.0f}₽",
                     (
-                        f"+{revenue_change:,.0f}₽"
-                        if revenue_change > 0
+                        f"{revenue_change:+,.0f}₽"
+                        if abs(revenue_change) >= 500
                         else "Без изменений"
                     ),
                 )
 
+                # Показываем детальную разбивку изменений
+                if abs(position_change) >= 0.5 or abs(revenue_change) >= 500:
+                    st.markdown("**📊 Детализация влияния:**")
+                    
+                    # Рассчитываем вклад каждого фактора для отображения
+                    contributions = []
+                    
+                    base_promo = factors_data.get("Цена и скидки", 20)
+                    if abs(promo_participation - base_promo) > 1:
+                        promo_effect = -((promo_participation - base_promo) / 10.0) * 5
+                        contributions.append(f"• Акции: {promo_effect:+.1f} поз.")
+                    
+                    base_sales = factors_data.get("Продажи и оборот", 45)
+                    if abs(sales_volume - base_sales) > 1:
+                        sales_effect = -((sales_volume - base_sales) / 15.0) * 8
+                        contributions.append(f"• Продажи: {sales_effect:+.1f} поз.")
+                    
+                    base_rating = factors_data.get("Рейтинги и отзывы", 75)
+                    if abs(product_rating - base_rating) > 1:
+                        rating_effect = -((product_rating - base_rating) / 15.0) * 6
+                        contributions.append(f"• Рейтинг: {rating_effect:+.1f} поз.")
+                    
+                    base_delivery = factors_data.get("Доставка", 60)
+                    if abs(delivery_quality - base_delivery) > 1:
+                        delivery_effect = -((delivery_quality - base_delivery) / 12.0) * 7
+                        contributions.append(f"• Доставка: {delivery_effect:+.1f} поз.")
+                    
+                    current_price = current_data.get("price", 1200)
+                    if abs(price - current_price) / current_price > 0.05:
+                        price_effect = ((price - current_price) / current_price) * 15
+                        contributions.append(f"• Цена: {price_effect:+.1f} поз.")
+                    
+                    if contributions:
+                        for contrib in contributions[:4]:  # Показываем топ-4
+                            st.markdown(contrib)
+                
                 # Показываем общий эффект
-                if position_change != 0 or revenue_change > 0:
-                    st.success(
-                        f"📈 Общий эффект: {abs(position_change)} позиций вверх, +{revenue_change:,.0f}₽ к выручке"
-                    )
+                if abs(position_change) >= 0.5 or abs(revenue_change) >= 500:
+                    if position_change < -2:
+                        st.success(f"🚀 Отличное улучшение: {abs(position_change):.0f} позиций вверх!")
+                    elif position_change < -0.5:
+                        st.success(f"📈 Улучшение позиции на {abs(position_change):.0f} мест")
+                    elif position_change > 2:
+                        st.warning(f"📉 Ухудшение позиции на {position_change:.0f} мест")
+                    
+                    if revenue_change > 5000:
+                        st.success(f"💰 Рост выручки: +{revenue_change:,.0f}₽")
+                    elif revenue_change < -1000:
+                        st.warning(f"💸 Снижение выручки: {revenue_change:,.0f}₽")
                 else:
-                    st.info("🔄 Измените параметры выше для просмотра эффекта")
+                    st.info("🔄 Измените параметры больше для заметного эффекта")
 
             except Exception as e:
                 st.error(f"Ошибка расчета: {e}")
